@@ -8,7 +8,7 @@ import streamlit as st
 st.set_page_config(page_title="CSF Signals", layout="wide")
 
 
-CSV_PATH = Path("data/processed/processed_signals.csv")
+CSV_PATH = Path("processed_signals.csv")
 
 
 def pick_column(df, candidates):
