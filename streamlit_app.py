@@ -15,7 +15,7 @@ st.set_page_config(page_title="CSF Signals Search", layout="wide")
 
 APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parent
-CSV_PATH = REPO_ROOT / "data/processed/processed_signals.csv"
+CSV_PATH = REPO_ROOT / "processed_signals.csv"
 IMAGE_BASE_URL = os.getenv("CSF_IMAGE_BASE_URL", "").rstrip("/")
 
 
