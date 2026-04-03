@@ -1,0 +1,35 @@
+{
+  "tags": [
+    {
+      "canonical": "#K",
+      "aliases": ["#k", "k"],
+      "keywords": [
+        "k-shaped economy",
+        "k shaped economy",
+        "uneven recovery",
+        "economic divergence",
+        "income divergence"
+      ]
+    },
+    {
+      "canonical": "#Aging",
+      "aliases": ["#ageing", "aging", "ageing"],
+      "keywords": [
+        "aging population",
+        "ageing population",
+        "older workers",
+        "silver economy"
+      ]
+    },
+    {
+      "canonical": "#Heat",
+      "aliases": ["heat"],
+      "keywords": [
+        "heat stress",
+        "extreme heat",
+        "urban heat",
+        "wet bulb"
+      ]
+    }
+  ]
+}
