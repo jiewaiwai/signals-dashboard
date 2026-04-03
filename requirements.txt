@@ -1,0 +1,13 @@
+streamlit
+pandas
+openpyxl
+pillow
+requests
+beautifulsoup4
+lxml
+trafilatura
+python-dateutil
+lxml_html_clean
+sentence-transformers
+scikit-learn
+pypdf
