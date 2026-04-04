@@ -48,6 +48,20 @@ SOCIAL_DOMAINS = {
     'youtube.com', 'www.youtube.com', 'youtu.be',
     'reddit.com', 'www.reddit.com',
 }
+JUNK_TEXT_MARKERS = [
+    'skip to content',
+    'new chat',
+    'search chats',
+    'privacy policy',
+    'log in',
+    'sign up',
+    'cookie',
+    'terms of use',
+    'accept all',
+    'subscribe',
+    'enable javascript',
+    'press and hold',
+]
 BLOCK_MARKERS = [
     'enable javascript',
     'enable cookies',
@@ -78,14 +92,14 @@ PRIVATE_FIELDS = [
     'original_attachment_name', 'person_description', 'discussion_hashtags',
     'matched_taxonomy_tags', 'signal_hashtags', 'tag_origin', 'tag_review_status',
     'scraped_header', 'sub_channel_name', 'article_text_extracted', 'article_summary',
-    'article_text', 'source_zip', 'message_id'
+    'record_quality_tier', 'summary_source', 'article_text', 'source_zip', 'message_id'
 ]
 
 PUBLISHED_FIELDS = [
     'signal_id', 'message_time', 'asset_type', 'link_url', 'final_url', 'source_domain',
     'source_type', 'fetch_status', 'extraction_method', 'image_path', 'scraped_header',
-    'sub_channel_name', 'article_text_extracted', 'article_summary', 'discussion_hashtags',
-    'signal_hashtags', 'tag_origin', 'tag_review_status'
+    'sub_channel_name', 'article_text_extracted', 'article_summary', 'record_quality_tier',
+    'summary_source', 'discussion_hashtags', 'signal_hashtags', 'tag_origin', 'tag_review_status'
 ]
 
 
@@ -215,6 +229,49 @@ def extract_title_from_html(html: str) -> Optional[str]:
     return None
 
 
+def extract_meta_description_from_html(html: str) -> Optional[str]:
+    soup = BeautifulSoup(html, 'html.parser')
+    candidates = [
+        ('meta', {'property': 'og:description'}),
+        ('meta', {'name': 'description'}),
+        ('meta', {'name': 'twitter:description'}),
+    ]
+    for tag_name, attrs in candidates:
+        tag = soup.find(tag_name, attrs=attrs)
+        if tag and tag.get('content'):
+            content = re.sub(r'\s+', ' ', tag['content']).strip()
+            if content:
+                return content
+    return None
+
+
+def clean_social_title(title: Optional[str], domain_label: str) -> Optional[str]:
+    if not title:
+        return None
+    cleaned = re.sub(r'\s+', ' ', title).strip()
+    cleaned = re.sub(r'\s*\|\s*LinkedIn.*$', '', cleaned, flags=re.I)
+    cleaned = re.sub(r'\s*\|\s*X$', '', cleaned, flags=re.I)
+    cleaned = re.sub(r'\s*on X:.*$', '', cleaned, flags=re.I)
+    cleaned = re.sub(r'^\(\d+\)\s*', '', cleaned)
+    cleaned = cleaned.strip(' -|')
+    if not cleaned or len(cleaned) < 5:
+        return None
+    return cleaned
+
+
+def summarize_social_metadata(title: Optional[str], description: Optional[str], domain: str, fallback_label: str) -> str:
+    parts = []
+    if title:
+        parts.append(title)
+    if description:
+        desc = re.sub(r'\s+', ' ', description).strip()
+        if desc and desc.lower() != (title or '').lower():
+            parts.append(desc[:220].rsplit(' ', 1)[0] if len(desc) > 220 else desc)
+    if parts:
+        return ' — '.join(parts)
+    return fallback_label or f'[{domain} post shared]'
+
+
 def visible_text_from_html(html: str) -> str:
     soup = BeautifulSoup(html, 'html.parser')
     for tag in soup(['script', 'style', 'noscript', 'header', 'footer']):
@@ -224,22 +281,87 @@ def visible_text_from_html(html: str) -> str:
     return text
 
 
-def fallback_title_from_url(url: str) -> str:
-    path = urlparse(url).path.strip('/')
-    tail = path.split('/')[-1] if path else urlparse(url).netloc
-    tail = re.sub(r'[-_]+', ' ', tail)
-    return tail[:160] if tail else url
+def fallback_title_from_url(url: str, source_type: str = 'html') -> str:
+    parsed = urlparse(url)
+    domain = strip_www(parsed.netloc)
+    path = parsed.path.strip('/')
+
+    typed_labels = {
+        'youtube': '[YouTube video shared]',
+        'x': '[X post shared]',
+        'instagram': '[Instagram post shared]',
+        'linkedin': '[LinkedIn post shared]',
+        'spotify': '[Spotify link shared]',
+        'chatgpt_share': '[ChatGPT shared page]',
+        'facebook': '[Facebook link shared]',
+        'tiktok': '[TikTok link shared]',
+        'reddit': '[Reddit thread shared]',
+    }
+    if source_type in typed_labels:
+        return typed_labels[source_type]
+
+    if source_type == 'pdf':
+        tail = path.split('/')[-1] if path else 'PDF document'
+        tail = re.sub(r'[-_]+', ' ', tail).strip()
+        return f'[PDF] {tail[:120]}' if tail else '[PDF document]'
+
+    tail = path.split('/')[-1] if path else domain
+    tail = re.sub(r'[-_]+', ' ', tail).strip()
+
+    if not tail:
+        return f'[{domain} link shared]' if domain else url
+
+    if len(tail) < 6 or re.fullmatch(r'[A-Za-z0-9]{1,14}', tail):
+        return f'[{domain} link shared]' if domain else url
+
+    if tail.lower() in {'index', 'home', 'default', 'article', 'story', 'watch', 'post', 'status'}:
+        return f'[{domain} link shared]' if domain else url
+
+    return tail[:160]
 
 
 def classify_source_type(url: str) -> str:
     parsed = urlparse(url)
     domain = strip_www(parsed.netloc)
     path = (parsed.path or '').lower()
+
     if path.endswith('.pdf'):
         return 'pdf'
-    if domain in SOCIAL_DOMAINS:
-        return 'social'
+    if domain in {'youtube.com', 'youtu.be'}:
+        return 'youtube'
+    if domain in {'x.com', 'twitter.com'}:
+        return 'x'
+    if domain in {'instagram.com'}:
+        return 'instagram'
+    if domain in {'linkedin.com'}:
+        return 'linkedin'
+    if domain in {'open.spotify.com'}:
+        return 'spotify'
+    if domain in {'chatgpt.com'} and '/share/' in path:
+        return 'chatgpt_share'
+    if domain in {'facebook.com', 'm.facebook.com'}:
+        return 'facebook'
+    if domain in {'tiktok.com'}:
+        return 'tiktok'
+    if domain in {'reddit.com'}:
+        return 'reddit'
     return 'html'
+
+
+def looks_like_junk_text(text: str) -> bool:
+    low = (text or '').lower()
+    marker_hits = sum(marker in low for marker in JUNK_TEXT_MARKERS)
+    if marker_hits >= 2:
+        return True
+    if low.count('http') >= 3:
+        return True
+    words = low.split()
+    if len(words) < 60:
+        return True
+    unique_ratio = len(set(words)) / max(len(words), 1)
+    if len(words) >= 80 and unique_ratio < 0.18:
+        return True
+    return False
 
 
 def clean_extracted_text(text: Optional[str]) -> Optional[str]:
@@ -250,7 +372,7 @@ def clean_extracted_text(text: Optional[str]) -> Optional[str]:
         return None
     if looks_blocked(cleaned):
         return None
-    if len(cleaned.split()) < 40:
+    if looks_like_junk_text(cleaned):
         return None
     return cleaned
 
@@ -281,11 +403,165 @@ def fetch_url_data(url: str, timeout: int = 10, session: Optional[requests.Sessi
         'fetch_status': 'not_attempted',
         'extraction_method': 'none',
         'source_type': source_type,
+        'record_quality_tier': 'unresolved',
     }
 
-    if source_type == 'social':
-        out['fetch_status'] = 'skipped_social_source'
-        out['title'] = fallback_title_from_url(url)
+    if source_type == 'youtube':
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.8',
+        }
+        try:
+            resp = session.get(url, timeout=(4, timeout), headers=headers, allow_redirects=True)
+            out['status_code'] = resp.status_code
+            out['final_url'] = resp.url or url
+
+            if resp.status_code >= 400:
+                out['fetch_status'] = f'http_{resp.status_code}'
+                out['title'] = fallback_title_from_url(out['final_url'], source_type='youtube')
+                out['extraction_method'] = 'youtube_http_error'
+                out['record_quality_tier'] = 'metadata_only'
+                return out
+
+            html = resp.text or ''
+            title = extract_title_from_html(html)
+
+            if not title:
+                m = re.search(r'<meta\s+name=["\']title["\']\s+content=["\']([^"\']+)["\']', html, re.I)
+                if m:
+                    title = m.group(1).strip()
+
+            if not title:
+                m = re.search(r'"title":"([^"\\]*(?:\\.[^"\\]*)*)"', html)
+                if m:
+                    title = bytes(m.group(1), 'utf-8').decode('unicode_escape').replace('\u0026', '&').strip()
+
+            out['title'] = title or fallback_title_from_url(out['final_url'], source_type='youtube')
+            out['fetch_status'] = 'metadata_only_youtube'
+            out['extraction_method'] = 'youtube_html_title' if title else 'youtube_fallback'
+            out['record_quality_tier'] = 'metadata_only'
+            return out
+
+        except requests.Timeout:
+            out['fetch_status'] = 'timeout'
+            out['title'] = fallback_title_from_url(url, source_type='youtube')
+            out['extraction_method'] = 'youtube_timeout'
+            out['record_quality_tier'] = 'metadata_only'
+            return out
+        except requests.RequestException:
+            out['fetch_status'] = 'request_error'
+            out['title'] = fallback_title_from_url(url, source_type='youtube')
+            out['extraction_method'] = 'youtube_request_error'
+            out['record_quality_tier'] = 'metadata_only'
+            return out
+        except Exception:
+            out['fetch_status'] = 'unexpected_error'
+            out['title'] = fallback_title_from_url(url, source_type='youtube')
+            out['extraction_method'] = 'youtube_unexpected_error'
+            out['record_quality_tier'] = 'metadata_only'
+            return out
+
+    if source_type == 'x':
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.8',
+        }
+        try:
+            oembed_resp = session.get(
+                'https://publish.twitter.com/oembed',
+                params={'url': url, 'omit_script': '1', 'dnt': 'true'},
+                timeout=(4, timeout),
+                headers=headers,
+            )
+            if oembed_resp.ok:
+                payload = oembed_resp.json()
+                author = re.sub(r'\s+', ' ', str(payload.get('author_name') or '')).strip()
+                html_snippet = str(payload.get('html') or '')
+                snippet = BeautifulSoup(html_snippet, 'html.parser').get_text(' ', strip=True)
+                snippet = re.sub(r'\s+', ' ', snippet).strip()
+                snippet = re.sub(r'\bpic\.twitter\.com/\S+', '', snippet).strip()
+                title_parts = [f'X post by {author}' if author else 'X post shared']
+                if snippet:
+                    title_parts.append(snippet[:220].rsplit(' ', 1)[0] if len(snippet) > 220 else snippet)
+                out['title'] = ' — '.join([p for p in title_parts if p]).strip(' —')
+                out['fetch_status'] = 'metadata_only_x'
+                out['extraction_method'] = 'x_oembed'
+                out['record_quality_tier'] = 'metadata_only'
+                return out
+        except Exception:
+            pass
+
+        try:
+            resp = session.get(url, timeout=(4, timeout), headers=headers, allow_redirects=True)
+            out['status_code'] = resp.status_code
+            out['final_url'] = resp.url or url
+            if resp.status_code >= 400:
+                out['fetch_status'] = f'http_{resp.status_code}'
+                out['title'] = fallback_title_from_url(out['final_url'], source_type='x')
+                out['extraction_method'] = 'x_http_error'
+                out['record_quality_tier'] = 'metadata_only'
+                return out
+
+            html = resp.text or ''
+            title = clean_social_title(extract_title_from_html(html), 'x')
+            description = extract_meta_description_from_html(html)
+            if title or description:
+                out['title'] = summarize_social_metadata(title, description, 'x.com', '[X post shared]')
+                out['fetch_status'] = 'metadata_only_x'
+                out['extraction_method'] = 'x_html_metadata'
+                out['record_quality_tier'] = 'metadata_only'
+                return out
+        except Exception:
+            pass
+
+        out['fetch_status'] = 'metadata_only_x'
+        out['title'] = fallback_title_from_url(url, source_type='x')
+        out['extraction_method'] = 'x_fallback'
+        out['record_quality_tier'] = 'metadata_only'
+        return out
+
+    if source_type == 'linkedin':
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.8',
+        }
+        try:
+            resp = session.get(url, timeout=(4, timeout), headers=headers, allow_redirects=True)
+            out['status_code'] = resp.status_code
+            out['final_url'] = resp.url or url
+            if resp.status_code >= 400:
+                out['fetch_status'] = f'http_{resp.status_code}'
+                out['title'] = fallback_title_from_url(out['final_url'], source_type='linkedin')
+                out['extraction_method'] = 'linkedin_http_error'
+                out['record_quality_tier'] = 'metadata_only'
+                return out
+
+            html = resp.text or ''
+            title = clean_social_title(extract_title_from_html(html), 'linkedin')
+            description = extract_meta_description_from_html(html)
+            if title or description:
+                out['title'] = summarize_social_metadata(title, description, 'linkedin.com', '[LinkedIn post shared]')
+                out['fetch_status'] = 'metadata_only_linkedin'
+                out['extraction_method'] = 'linkedin_html_metadata'
+                out['record_quality_tier'] = 'metadata_only'
+                return out
+        except Exception:
+            pass
+
+        out['fetch_status'] = 'metadata_only_linkedin'
+        out['title'] = fallback_title_from_url(url, source_type='linkedin')
+        out['extraction_method'] = 'linkedin_fallback'
+        out['record_quality_tier'] = 'metadata_only'
+        return out
+
+    if source_type in {'instagram', 'spotify', 'chatgpt_share', 'facebook', 'tiktok', 'reddit'}:
+        out['fetch_status'] = f'metadata_only_{source_type}'
+        out['title'] = fallback_title_from_url(url, source_type=source_type)
+        out['extraction_method'] = 'metadata_only'
+        out['record_quality_tier'] = 'metadata_only'
         return out
 
     headers = {
@@ -300,26 +576,30 @@ def fetch_url_data(url: str, timeout: int = 10, session: Optional[requests.Sessi
         out['status_code'] = resp.status_code
         out['final_url'] = resp.url or url
         content_type = (resp.headers.get('content-type') or '').lower()
+        out['source_type'] = classify_source_type(out['final_url'])
 
         if resp.status_code >= 400:
             out['fetch_status'] = f'http_{resp.status_code}'
-            out['title'] = fallback_title_from_url(out['final_url'])
+            out['title'] = fallback_title_from_url(out['final_url'], source_type=out['source_type'])
+            out['record_quality_tier'] = 'unresolved'
             return out
 
         if 'application/pdf' in content_type or out['final_url'].lower().endswith('.pdf'):
             out['source_type'] = 'pdf'
-            out['title'] = fallback_title_from_url(out['final_url'])
+            out['title'] = fallback_title_from_url(out['final_url'], source_type='pdf')
             out['text'] = extract_pdf_text(resp.content)
             out['fetch_status'] = 'ok_pdf' if out['text'] else 'pdf_no_text'
             out['extraction_method'] = 'pypdf' if out['text'] else 'pdf_failed'
+            out['record_quality_tier'] = 'full_article' if out['text'] else 'metadata_only'
             return out
 
         html = resp.text
-        out['title'] = extract_title_from_html(html) or fallback_title_from_url(out['final_url'])
+        out['title'] = extract_title_from_html(html) or fallback_title_from_url(out['final_url'], source_type=out['source_type'])
 
         if looks_blocked(html) or looks_blocked(out['title'] or ''):
             out['fetch_status'] = 'blocked_anti_bot'
-            out['extraction_method'] = 'html_blocked'
+            out['extraction_method'] = 'metadata_only_blocked'
+            out['record_quality_tier'] = 'metadata_only'
             return out
 
         extracted = trafilatura.extract(html, include_comments=False, include_tables=False)
@@ -328,6 +608,7 @@ def fetch_url_data(url: str, timeout: int = 10, session: Optional[requests.Sessi
             out['text'] = extracted
             out['fetch_status'] = 'ok_html'
             out['extraction_method'] = 'trafilatura'
+            out['record_quality_tier'] = 'full_article'
             return out
 
         visible = clean_extracted_text(visible_text_from_html(html))
@@ -335,10 +616,12 @@ def fetch_url_data(url: str, timeout: int = 10, session: Optional[requests.Sessi
             out['text'] = visible
             out['fetch_status'] = 'ok_html_fallback'
             out['extraction_method'] = 'beautifulsoup_visible_text'
+            out['record_quality_tier'] = 'full_article'
             return out
 
         out['fetch_status'] = 'html_no_text'
         out['extraction_method'] = 'html_failed'
+        out['record_quality_tier'] = 'metadata_only'
         return out
     except requests.Timeout:
         out['fetch_status'] = 'timeout'
@@ -347,7 +630,8 @@ def fetch_url_data(url: str, timeout: int = 10, session: Optional[requests.Sessi
     except Exception:
         out['fetch_status'] = 'unexpected_error'
 
-    out['title'] = fallback_title_from_url(out['final_url'])
+    out['title'] = fallback_title_from_url(out['final_url'], source_type=out['source_type'])
+    out['record_quality_tier'] = 'unresolved'
     return out
 
 
@@ -360,6 +644,20 @@ def heuristic_summary_from_article(title: str, article_text: str) -> str:
     if title:
         return f'{title}: {snippet}…'
     return snippet + ('…' if len(article_text) > len(snippet) else '')
+
+
+def fallback_signal_summary(title: str, discussion: str, domain: str, fetch_status: str) -> str:
+    discussion = normalize_space(discussion or '')
+    title = normalize_space(title or '')
+    domain = domain or 'unknown source'
+    fetch_status = fetch_status or 'unknown_status'
+
+    if discussion and discussion != 'NA':
+        snippet = discussion[:260].rsplit(' ', 1)[0]
+        return f'Shared from {domain}. Discussion context: {snippet}.'
+    if title and title != 'NA':
+        return f'Shared from {domain}. Available metadata: {title}.'
+    return f'Shared from {domain}. No article text was extracted ({fetch_status}).'
 
 
 def call_ollama_summary(model: str, title: str, text: str, timeout: int = 120) -> Optional[str]:
@@ -487,14 +785,19 @@ def match_taxonomy_tags(texts: Sequence[str], taxonomy: Sequence[dict], source_d
 def determine_signal_tags(discussion_text: str, title: str, article_text: str, source_domain: str,
                           taxonomy: Sequence[dict], alias_map: Dict[str, str]) -> Tuple[List[str], List[str], str, str, List[str]]:
     explicit = normalize_discussion_tags(extract_inline_hashtags(discussion_text), alias_map)
-    taxonomy_matches = match_taxonomy_tags([discussion_text, title, article_text], taxonomy, source_domain=source_domain)
+    taxonomy_matches = match_taxonomy_tags([discussion_text, title, article_text, source_domain], taxonomy, source_domain=source_domain)
 
     if explicit:
         final_tags = explicit
         tag_origin = 'discussion_explicit'
     elif taxonomy_matches:
         final_tags = taxonomy_matches
-        tag_origin = 'taxonomy_match'
+        if article_text and article_text != 'NA':
+            tag_origin = 'taxonomy_match_article'
+        elif discussion_text and discussion_text != 'NA':
+            tag_origin = 'taxonomy_match_discussion'
+        else:
+            tag_origin = 'taxonomy_match_metadata'
     else:
         final_tags = []
         tag_origin = 'none'
@@ -529,6 +832,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         sub_channel_name TEXT,
         article_text_extracted TEXT,
         article_summary TEXT,
+        record_quality_tier TEXT,
+        summary_source TEXT,
         article_text TEXT,
         source_zip TEXT,
         message_id TEXT
@@ -589,6 +894,8 @@ def collect_records(input_dir: Path, image_dir: Path) -> List[dict]:
                     'sub_channel_name': msg.chat_name,
                     'article_text_extracted': 'no',
                     'article_summary': 'NA',
+                    'record_quality_tier': 'unresolved',
+                    'summary_source': 'none',
                     'article_text': None,
                     'source_zip': msg.source_zip,
                     'message_id': msg.message_id,
@@ -618,6 +925,8 @@ def collect_records(input_dir: Path, image_dir: Path) -> List[dict]:
                     'sub_channel_name': msg.chat_name,
                     'article_text_extracted': 'NA',
                     'article_summary': 'NA',
+                    'record_quality_tier': 'metadata_only',
+                    'summary_source': 'none',
                     'article_text': None,
                     'source_zip': msg.source_zip,
                     'message_id': msg.message_id,
@@ -649,7 +958,8 @@ def enrich_records(records: List[dict], taxonomy: Sequence[dict], alias_map: Dic
             rec['source_type'] = meta.get('source_type') or rec['source_type']
             rec['fetch_status'] = meta.get('fetch_status') or rec['fetch_status']
             rec['extraction_method'] = meta.get('extraction_method') or rec['extraction_method']
-            rec['scraped_header'] = meta.get('title') or fallback_title_from_url(final_url)
+            rec['record_quality_tier'] = meta.get('record_quality_tier') or rec.get('record_quality_tier') or 'unresolved'
+            rec['scraped_header'] = meta.get('title') or fallback_title_from_url(final_url, source_type=rec['source_type'])
 
             article_text = (meta.get('text') or '').strip()
             rec['article_text'] = article_text or None
@@ -657,8 +967,15 @@ def enrich_records(records: List[dict], taxonomy: Sequence[dict], alias_map: Dic
             if article_text:
                 summary = call_ollama_summary(ollama_model, rec['scraped_header'], article_text) if use_ollama else None
                 rec['article_summary'] = summary or heuristic_summary_from_article(rec['scraped_header'], article_text)
+                rec['summary_source'] = 'article_text'
             else:
-                rec['article_summary'] = 'NA'
+                rec['article_summary'] = fallback_signal_summary(
+                    rec['scraped_header'],
+                    rec['person_description'],
+                    rec['source_domain'],
+                    rec['fetch_status'],
+                )
+                rec['summary_source'] = 'discussion_fallback' if rec.get('person_description') not in [None, '', 'NA'] else 'metadata_fallback'
 
         explicit, taxonomy_matches, tag_origin, review_status, final_tags = determine_signal_tags(
             discussion_text=rec['person_description'],
@@ -821,6 +1138,8 @@ def make_published_records(records: List[dict]) -> List[dict]:
             'sub_channel_name': r['sub_channel_name'] or 'NA',
             'article_text_extracted': r['article_text_extracted'] or 'NA',
             'article_summary': r['article_summary'] or 'NA',
+            'record_quality_tier': r.get('record_quality_tier') or 'unresolved',
+            'summary_source': r.get('summary_source') or 'unknown',
             'discussion_hashtags': r['discussion_hashtags'] or 'NA',
             'signal_hashtags': r['signal_hashtags'] or 'NA',
             'tag_origin': r['tag_origin'] or 'NA',
