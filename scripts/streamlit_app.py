@@ -15,7 +15,7 @@ st.set_page_config(page_title="CSF Signals Search", layout="wide")
 
 APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parent
-CSV_PATH = REPO_ROOT / "processed_signals.csv"
+CSV_PATH = REPO_ROOT / "data/processed/processed_signals.csv"
 IMAGE_BASE_URL = os.getenv("CSF_IMAGE_BASE_URL", "").rstrip("/")
 
 
@@ -382,11 +382,12 @@ with explore_tab:
 
     st.markdown("### Clusters in current view")
     cluster_counts = (
-        filtered["cluster_label"].value_counts().reset_index()
-        .rename(columns={"index": "cluster", "cluster_label": "count"})
+        filtered["cluster_label"]
+        .value_counts()
+        .rename_axis("cluster")
+        .reset_index(name="count")
     )
-    st.dataframe(cluster_counts, use_container_width=True, hide_index=True)
-
+st.dataframe(cluster_counts, use_container_width=True, hide_index=True)
     st.markdown("## Results")
     for idx, row in filtered.iterrows():
         with st.container():
