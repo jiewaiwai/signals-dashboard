@@ -271,7 +271,7 @@ with explore_tab:
             selected_channels = None
 
         if col_domain:
-            domains = sorted([d for d in df[col_domain].dropna().astype(str).unique().tolist() if d and d != "NA"])
+            domains = sorted([d for d in df[col_domain].dropna().astype(str).unique().tolist() if d])
             selected_domains = st.multiselect("Source domain", domains, default=domains)
         else:
             selected_domains = None
@@ -318,7 +318,7 @@ with explore_tab:
     if col_channel and selected_channels is not None:
         filtered = filtered[filtered[col_channel].astype(str).isin(selected_channels)]
 
-    if col_domain and selected_domains is not None:
+    if col_domain and selected_domains is not None and len(selected_domains) > 0:
         filtered = filtered[filtered[col_domain].astype(str).isin(selected_domains)]
 
     if col_fetch_status and selected_statuses is not None:
