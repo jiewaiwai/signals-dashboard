@@ -400,6 +400,7 @@ with explore_tab:
                 if not shown:
                     if asset_type.lower() == "image":
                         st.write("Image not found in deployment")
+                        st.caption(f"Tried image_path: {safe_text(row.get(col_image))}")
                     elif col_link:
                         link = safe_text(row.get(col_link))
                         if link != "NA":
