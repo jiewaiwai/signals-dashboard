@@ -387,71 +387,74 @@ with explore_tab:
         .rename_axis("cluster")
         .reset_index(name="count")
     )
-st.dataframe(cluster_counts, use_container_width=True, hide_index=True)
-st.markdown("## Results")
+    st.dataframe(cluster_counts, use_container_width=True, hide_index=True)
 
-for idx, row in filtered.iterrows():
-    with st.container():
-        left, right = st.columns([1.2, 2.8])
+    st.markdown("## Results")
+    for idx, row in filtered.iterrows():
+        with st.container():
+            left, right = st.columns([1.2, 2.8])
 
-        with left:
-            asset_type = safe_text(row.get(col_type))
-
-            if asset_type.lower() == "image":
+            with left:
+                asset_type = safe_text(row.get(col_type))
                 shown = show_image_from_candidates(get_image_candidates(row, col_link, col_image))
                 if not shown:
-                    st.write("Image not found")
-            else:
-                shown = show_image_from_candidates(get_image_candidates(row, col_link, col_image))
-                if not shown and col_link:
+                    if asset_type.lower() == "image":
+                        st.write("Image not found in deployment")
+                    elif col_link:
+                        link = safe_text(row.get(col_link))
+                        if link != "NA":
+                            st.markdown(f"[Open link]({link})")
+
+            with right:
+                header = safe_text(row.get(col_header)) if col_header else "NA"
+                st.subheader(header)
+
+                meta = []
+                if col_time:
+                    meta.append(f"**Time:** {safe_text(row.get(col_time))}")
+                if col_channel:
+                    meta.append(f"**Channel:** {safe_text(row.get(col_channel))}")
+                if col_domain:
+                    meta.append(f"**Domain:** {safe_text(row.get(col_domain))}")
+                if col_stage:
+                    meta.append(f"**Stage:** {safe_text(row.get(col_stage))}")
+                if col_extracted:
+                    meta.append(f"**Article text extracted?:** {safe_text(row.get(col_extracted))}")
+                if col_fetch_status:
+                    meta.append(f"**Fetch:** {safe_text(row.get(col_fetch_status))}")
+                meta.append(f"**Cluster:** {safe_text(row.get('cluster_label'))}")
+                st.markdown(" | ".join(meta))
+
+                if col_summary:
+                    st.markdown(f"**Article summary:** {safe_text(row.get(col_summary))}")
+
+                if col_discussion_tags:
+                    discussion_tags = extract_hashtags(row.get(col_discussion_tags), lower=False)
+                    if discussion_tags:
+                        st.markdown("**Discussion hashtags:** " + " ".join([f"`{t}`" for t in discussion_tags]))
+
+                if col_tags:
+                    parsed = extract_hashtags(row.get(col_tags), lower=False)
+                    if parsed:
+                        st.markdown("**Signal hashtags:** " + " ".join([f"`{t}`" for t in parsed]))
+                    else:
+                        st.markdown("**Signal hashtags:** NA")
+
+                if col_tag_origin:
+                    st.markdown(f"**Tag origin:** {safe_text(row.get(col_tag_origin))}")
+                if col_tag_review:
+                    st.markdown(f"**Tag review:** {safe_text(row.get(col_tag_review))}")
+
+                if semantic_query.strip() and "semantic_score" in df.columns:
+                    score = df.loc[idx, "semantic_score"]
+                    st.markdown(f"**Semantic similarity:** {score:.3f}")
+
+                if col_link:
                     link = safe_text(row.get(col_link))
                     if link != "NA":
-                        st.markdown(f"[Open link]({link})")
+                        st.markdown(f"[Open original]({link})")
 
-        with right:
-            header = safe_text(row.get(col_header)) if col_header else "NA"
-            st.subheader(header)
-
-            meta = []
-            if col_time:
-                meta.append(f"**Time:** {safe_text(row.get(col_time))}")
-            if col_sender:
-                meta.append(f"**Sender:** {safe_text(row.get(col_sender))}")
-            if col_channel:
-                meta.append(f"**Channel:** {safe_text(row.get(col_channel))}")
-            if col_stage:
-                meta.append(f"**Stage:** {safe_text(row.get(col_stage))}")
-            if col_extracted:
-                meta.append(f"**Article text extracted?:** {safe_text(row.get(col_extracted))}")
-            meta.append(f"**Cluster:** {safe_text(row.get('cluster_label'))}")
-
-            st.markdown(" | ".join(meta))
-
-            if col_desc:
-                st.markdown(f"**Person description:** {safe_text(row.get(col_desc))}")
-
-            if col_summary:
-                st.markdown(f"**Article summary:** {safe_text(row.get(col_summary))}")
-
-            if col_tags:
-                tags = row.get(col_tags)
-                parsed = extract_hashtags(tags)
-                if parsed:
-                    st.markdown("**Hashtags:** " + " ".join([f"`{t}`" for t in parsed]))
-                else:
-                    st.markdown("**Hashtags:** NA")
-
-            if semantic_query.strip() and "semantic_score" in df.columns:
-                score = df.loc[idx, "semantic_score"]
-                st.markdown(f"**Semantic similarity:** {score:.3f}")
-
-            if col_link:
-                link = safe_text(row.get(col_link))
-                if link != "NA":
-                    st.markdown(f"[Open original]({link})")
-
-        st.divider()
-
+            st.divider()
 with overview_tab:
     st.markdown("## Overview")
     if col_time and df["message_dt"].notna().any():
