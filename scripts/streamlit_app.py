@@ -18,6 +18,15 @@ REPO_ROOT = APP_DIR.parent
 CSV_PATH = REPO_ROOT / "data/processed/processed_signals.csv"
 IMAGE_BASE_URL = os.getenv("CSF_IMAGE_BASE_URL", "").rstrip("/")
 
+st.write("REPO_ROOT:", REPO_ROOT)
+
+test_image = REPO_ROOT / "WhatsApp_Chat_-_ECONOMY_Jobs_Learning/3a40bb677e6fa2f3.jpg"
+
+st.write("Test image path:", test_image)
+st.write("Test image exists:", test_image.exists())
+
+if test_image.exists():
+    st.image(str(test_image), use_container_width=True)
 
 # -----------------------------
 # Helpers
