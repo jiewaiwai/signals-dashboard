@@ -67,23 +67,34 @@ def build_search_text(row, cols):
 
 
 def resolve_local_file(candidate: str):
-    if not candidate or candidate == "NA":
+    if not candidate:
         return None
 
-    path = Path(candidate)
-    probes = []
-    if path.is_absolute():
-        probes.append(path)
-    else:
-        probes.extend([
-            Path.cwd() / path,
-            REPO_ROOT / path,
-            APP_DIR / path,
-        ])
+    raw = str(candidate).strip()
+
+    if raw in ["", "NA", "nan", "None"]:
+        return None
+
+    if raw.lower().startswith(("http://", "https://")):
+        return None
+
+    cleaned = raw.lstrip("./").lstrip("/")
+
+    probes = [
+        Path.cwd() / raw,
+        REPO_ROOT / raw,
+        APP_DIR / raw,
+        REPO_ROOT / cleaned,
+        APP_DIR / cleaned,
+    ]
 
     for probe in probes:
-        if probe.exists():
-            return probe
+        try:
+            if probe.exists() and probe.is_file():
+                return probe
+        except OSError:
+            continue
+
     return None
 
 
