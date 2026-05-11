@@ -67,34 +67,23 @@ def build_search_text(row, cols):
 
 
 def resolve_local_file(candidate: str):
-    if not candidate:
+    if not candidate or candidate == "NA":
         return None
 
-    raw = str(candidate).strip()
-
-    if raw in ["", "NA", "nan", "None"]:
-        return None
-
-    if raw.lower().startswith(("http://", "https://")):
-        return None
-
-    cleaned = raw.lstrip("./").lstrip("/")
-
-    probes = [
-        Path.cwd() / raw,
-        REPO_ROOT / raw,
-        APP_DIR / raw,
-        REPO_ROOT / cleaned,
-        APP_DIR / cleaned,
-    ]
+    path = Path(candidate)
+    probes = []
+    if path.is_absolute():
+        probes.append(path)
+    else:
+        probes.extend([
+            Path.cwd() / path,
+            REPO_ROOT / path,
+            APP_DIR / path,
+        ])
 
     for probe in probes:
-        try:
-            if probe.exists() and probe.is_file():
-                return probe
-        except OSError:
-            continue
-
+        if probe.exists():
+            return probe
     return None
 
 
@@ -411,7 +400,6 @@ with explore_tab:
                 if not shown:
                     if asset_type.lower() == "image":
                         st.write("Image not found in deployment")
-                        st.caption(f"Tried image_path: {safe_text(row.get(col_image))}")
                     elif col_link:
                         link = safe_text(row.get(col_link))
                         if link != "NA":
