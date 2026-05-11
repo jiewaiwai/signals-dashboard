@@ -313,6 +313,10 @@ for review_col in ["upvotes", "downvotes", "notes", "score"]:
         df[review_col] = 0
     df[review_col] = df[review_col].fillna(0).astype(int)
 
+# Downvotes act as vetoes: any veto pushes a record below all non-vetoed records.
+df["vetoed"] = df["downvotes"] > 0
+df["opinion_rank"] = np.where(df["vetoed"], -1_000_000 - df["downvotes"], df["upvotes"])
+
 search_cols = [col_header, col_summary, col_tags, col_discussion_tags, col_channel, col_domain]
 df["search_text"] = df.apply(lambda row: build_search_text(row, search_cols), axis=1)
 
@@ -352,11 +356,10 @@ with explore_tab:
         sort_by = st.selectbox(
             "Sort results by",
             [
+                "Best by opinion",
                 "Newest first",
                 "Semantic relevance",
-                "Highest human score",
                 "Most upvoted",
-                "Most downvoted",
             ],
         )
 
@@ -383,16 +386,18 @@ with explore_tab:
         df["semantic_score"] = np.nan
 
     if sort_by == "Semantic relevance" and semantic_query.strip():
+        # Semantic relevance is still available when a semantic query is entered,
+        # but vetoed items remain at the bottom within the semantic results.
         filtered = filtered.loc[df.loc[filtered.index, "semantic_score"].sort_values(ascending=False).index]
-    elif sort_by == "Highest human score":
-        sort_cols = ["score"] + (["message_dt"] if "message_dt" in filtered.columns else [])
-        filtered = filtered.sort_values(sort_cols, ascending=[False] * len(sort_cols))
-    elif sort_by == "Most upvoted":
-        sort_cols = ["upvotes"] + (["message_dt"] if "message_dt" in filtered.columns else [])
-        filtered = filtered.sort_values(sort_cols, ascending=[False] * len(sort_cols))
-    elif sort_by == "Most downvoted":
-        sort_cols = ["downvotes"] + (["message_dt"] if "message_dt" in filtered.columns else [])
-        filtered = filtered.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+        if "vetoed" in filtered.columns:
+            filtered = filtered.sort_values(["vetoed"], ascending=[True], kind="stable")
+    elif sort_by in ["Best by opinion", "Most upvoted"]:
+        sort_cols = ["vetoed", "upvotes"]
+        ascending = [True, False]
+        if "message_dt" in filtered.columns:
+            sort_cols.append("message_dt")
+            ascending.append(False)
+        filtered = filtered.sort_values(sort_cols, ascending=ascending, na_position="last")
     elif col_time and "message_dt" in filtered.columns:
         filtered = filtered.sort_values("message_dt", ascending=False, na_position="last")
 
@@ -402,7 +407,7 @@ with explore_tab:
     c1.metric("Visible records", len(filtered))
     c2.metric("Total records", len(df))
     c3.metric("Total unique hashtags", len(all_tags))
-    c4.metric("Human votes", int(df["upvotes"].sum() + df["downvotes"].sum()))
+    c4.metric("Positive votes", int(df["upvotes"].sum()))
 
     st.markdown("### Top hashtags in current view")
     current_tag_counter = Counter(tag for tags in filtered["parsed_hashtags"] for tag in tags)
@@ -465,10 +470,10 @@ with explore_tab:
                 upvotes = int(row.get("upvotes", 0))
                 downvotes = int(row.get("downvotes", 0))
                 notes = int(row.get("notes", 0))
-                human_score = int(row.get("score", 0))
+                veto_label = " | Vetoed" if downvotes > 0 else ""
 
                 with st.expander(
-                    f"Human review: 👍 {upvotes} | 👎 {downvotes} | Notes {notes} | Score {human_score}",
+                    f"Your Opinion: 👍 {upvotes} | Notes {notes}{veto_label}",
                     expanded=False,
                 ):
                     vote_col1, vote_col2 = st.columns(2)
@@ -537,18 +542,18 @@ with overview_tab:
     m1.metric("All records", len(df))
     m2.metric("Last 30 days", len(recent))
     m3.metric("Needs tag review", int((df[col_tag_review] == "needs_review").sum()) if col_tag_review else 0)
-    m4.metric("Human votes", int(df["upvotes"].sum() + df["downvotes"].sum()))
+    m4.metric("Positive votes", int(df["upvotes"].sum()))
 
     if latest_time is not None:
         st.caption(f"Recent window anchored to latest record in dataset: {latest_time}")
 
-    if "score" in df.columns and (df["upvotes"].sum() + df["downvotes"].sum()) > 0:
-        st.markdown("### Highest-rated signals by human review")
+    if "upvotes" in df.columns and df["upvotes"].sum() > 0:
+        st.markdown("### Highest-rated signals by your opinion")
         display_cols = []
-        for candidate in [col_time, col_channel, col_header, col_domain, "upvotes", "downvotes", "score"]:
+        for candidate in [col_time, col_channel, col_header, col_domain, "upvotes", "notes", "vetoed"]:
             if candidate and candidate in df.columns and candidate not in display_cols:
                 display_cols.append(candidate)
-        top_reviewed = df.sort_values(["score", "upvotes"], ascending=[False, False]).head(10)
+        top_reviewed = df.sort_values(["vetoed", "upvotes", "message_dt"], ascending=[True, False, False], na_position="last").head(10)
         st.dataframe(top_reviewed[display_cols], use_container_width=True, hide_index=True)
 
     if col_channel and not recent.empty:
