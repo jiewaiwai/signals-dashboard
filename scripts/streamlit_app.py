@@ -130,6 +130,99 @@ def show_image_from_candidates(candidates):
     return shown
 
 
+def short_text(val, max_chars=220):
+    text = safe_text(val)
+    if text == "NA":
+        return "NA"
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rsplit(" ", 1)[0] + "…"
+
+
+def render_signal_card(row, idx, semantic_query=""):
+    """Render one signal as a compact card for the grid layout."""
+    with st.container(border=True):
+        asset_type = safe_text(row.get(col_type))
+        link = safe_text(row.get(col_link)) if col_link else "NA"
+
+        shown = show_image_from_candidates(get_image_candidates(row, col_link, col_image))
+        if not shown and asset_type.lower() == "image":
+            st.caption("Image not found in deployment")
+
+        header = safe_text(row.get(col_header)) if col_header else "NA"
+        if header == "NA" and asset_type.lower() == "image":
+            header = "Image signal"
+
+        st.markdown(f"#### {header}")
+
+        meta = []
+        if col_domain:
+            domain = safe_text(row.get(col_domain))
+            if domain != "NA":
+                meta.append(domain)
+        if col_channel:
+            channel = safe_text(row.get(col_channel))
+            if channel != "NA":
+                meta.append(channel)
+        if col_time:
+            time_val = safe_text(row.get(col_time))
+            if time_val != "NA":
+                meta.append(time_val)
+        if meta:
+            st.caption(" · ".join(meta))
+
+        if col_summary:
+            summary = short_text(row.get(col_summary), 260)
+            if summary != "NA":
+                st.markdown(summary)
+
+        if col_tags:
+            parsed = extract_hashtags(row.get(col_tags), lower=False)
+            if parsed:
+                st.markdown(" ".join([f"`{t}`" for t in parsed[:6]]))
+
+        signal_id = safe_text(row.get(col_id)) if col_id else str(idx)
+        upvotes = int(row.get("upvotes", 0))
+        downvotes = int(row.get("downvotes", 0))
+        notes = int(row.get("notes", 0))
+        veto_label = " | Vetoed" if downvotes > 0 else ""
+
+        with st.expander(f"Your Opinion: 👍 {upvotes} | Notes {notes}{veto_label}", expanded=False):
+            vote_col1, vote_col2 = st.columns(2)
+            with vote_col1:
+                if st.button("👍 Useful / emerging", key=widget_key("up", signal_id)):
+                    save_vote(signal_id, "up")
+                    st.success("Vote saved.")
+                    st.rerun()
+            with vote_col2:
+                if st.button("👎 Not useful", key=widget_key("down", signal_id)):
+                    save_vote(signal_id, "down")
+                    st.warning("Vote saved.")
+                    st.rerun()
+
+            comment = st.text_input(
+                "Optional note",
+                key=widget_key("comment", signal_id),
+                placeholder="Why is this useful, emerging, noisy, or irrelevant?",
+            )
+            if st.button("Save note", key=widget_key("note", signal_id)):
+                if comment.strip():
+                    save_vote(signal_id, "note", comment)
+                    st.success("Note saved.")
+                    st.rerun()
+                else:
+                    st.info("Write a note before saving.")
+
+        if semantic_query.strip() and "semantic_score" in df.columns:
+            score = df.loc[idx, "semantic_score"]
+            if pd.notna(score):
+                st.caption(f"Semantic similarity: {score:.3f}")
+
+        if link != "NA":
+            st.markdown(f"[Open original]({link})")
+
+
 # -----------------------------
 # Human review / voting helpers
 # -----------------------------
@@ -363,20 +456,16 @@ with explore_tab:
             ],
         )
 
-        top_n = 30
-
     filtered = df.copy()
     filtered = filtered[filtered[col_type].astype(str).isin(selected_types)]
 
     if col_channel and selected_channels is not None:
         filtered = filtered[filtered[col_channel].astype(str).isin(selected_channels)]
 
-
     if keyword_search:
         filtered = filtered[
             filtered["search_text"].astype(str).str.contains(keyword_search, case=False, na=False)
         ]
-
 
     if semantic_query.strip():
         query_embedding = compute_embeddings([semantic_query])[0]
@@ -392,6 +481,7 @@ with explore_tab:
         if "vetoed" in filtered.columns:
             filtered = filtered.sort_values(["vetoed"], ascending=[True], kind="stable")
     elif sort_by in ["Best by opinion", "Most upvoted"]:
+        # Upvotes push records up; any thumbs-down is treated as a veto and pushed below non-vetoed records.
         sort_cols = ["vetoed", "upvotes"]
         ascending = [True, False]
         if "message_dt" in filtered.columns:
@@ -401,24 +491,52 @@ with explore_tab:
     elif col_time and "message_dt" in filtered.columns:
         filtered = filtered.sort_values("message_dt", ascending=False, na_position="last")
 
-    filtered = filtered.head(top_n)
+    total_matching = len(filtered)
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Visible records", len(filtered))
+    c1.metric("Matching records", total_matching)
     c2.metric("Total records", len(df))
     c3.metric("Total unique hashtags", len(all_tags))
     c4.metric("Positive votes", int(df["upvotes"].sum()))
 
-    st.markdown("### Top hashtags in current view")
-    current_tag_counter = Counter(tag for tags in filtered["parsed_hashtags"] for tag in tags)
+    # Pagination: the result set is no longer capped with .head().
+    # Instead, all matching records are split into pages.
+    page_size = st.selectbox("Records per page", [9, 18, 27, 36, 54], index=1)
+    total_pages = max(1, int(np.ceil(total_matching / page_size)))
+
+    if "results_page" not in st.session_state:
+        st.session_state["results_page"] = 1
+    if st.session_state["results_page"] > total_pages:
+        st.session_state["results_page"] = total_pages
+    if st.session_state["results_page"] < 1:
+        st.session_state["results_page"] = 1
+
+    page = st.number_input(
+        "Page",
+        min_value=1,
+        max_value=total_pages,
+        step=1,
+        key="results_page",
+    )
+
+    start_idx = (int(page) - 1) * page_size
+    end_idx = start_idx + page_size
+    page_df = filtered.iloc[start_idx:end_idx]
+
+    st.caption(
+        f"Showing records {start_idx + 1 if total_matching else 0}–{min(end_idx, total_matching)} "
+        f"of {total_matching} across {total_pages} page(s)."
+    )
+
+    st.markdown("### Top hashtags on this page")
+    current_tag_counter = Counter(tag for tags in page_df["parsed_hashtags"] for tag in tags)
     if current_tag_counter:
         top_tags_text = "  ".join([f"`{tag}` ({count})" for tag, count in current_tag_counter.most_common(15)])
         st.markdown(top_tags_text)
     else:
-        st.write("No hashtags in current view.")
+        st.write("No hashtags on this page.")
 
-
-    st.markdown("### Clusters in current view")
+    st.markdown("### Clusters in matching records")
     cluster_counts = (
         filtered["cluster_label"]
         .value_counts()
@@ -428,106 +546,15 @@ with explore_tab:
     st.dataframe(cluster_counts, use_container_width=True, hide_index=True)
 
     st.markdown("## Results")
-    for idx, row in filtered.iterrows():
-        with st.container():
-            left, right = st.columns([1.2, 2.8])
-
-            with left:
-                asset_type = safe_text(row.get(col_type))
-                shown = show_image_from_candidates(get_image_candidates(row, col_link, col_image))
-                if not shown:
-                    if asset_type.lower() == "image":
-                        st.write("Image not found in deployment")
-                    elif col_link:
-                        link = safe_text(row.get(col_link))
-                        if link != "NA":
-                            st.markdown(f"[Open link]({link})")
-
-            with right:
-                header = safe_text(row.get(col_header)) if col_header else "NA"
-                st.subheader(header)
-
-                meta = []
-                if col_time:
-                    meta.append(f"**Time:** {safe_text(row.get(col_time))}")
-                if col_channel:
-                    meta.append(f"**Channel:** {safe_text(row.get(col_channel))}")
-                if col_domain:
-                    meta.append(f"**Domain:** {safe_text(row.get(col_domain))}")
-                if col_stage:
-                    meta.append(f"**Stage:** {safe_text(row.get(col_stage))}")
-                if col_extracted:
-                    meta.append(f"**Article text extracted?:** {safe_text(row.get(col_extracted))}")
-                if col_fetch_status:
-                    meta.append(f"**Fetch:** {safe_text(row.get(col_fetch_status))}")
-                meta.append(f"**Cluster:** {safe_text(row.get('cluster_label'))}")
-                st.markdown(" | ".join(meta))
-
-                if col_summary:
-                    st.markdown(f"**Article summary:** {safe_text(row.get(col_summary))}")
-
-                signal_id = safe_text(row.get(col_id)) if col_id else str(idx)
-                upvotes = int(row.get("upvotes", 0))
-                downvotes = int(row.get("downvotes", 0))
-                notes = int(row.get("notes", 0))
-                veto_label = " | Vetoed" if downvotes > 0 else ""
-
-                with st.expander(
-                    f"Your Opinion: 👍 {upvotes} | Notes {notes}{veto_label}",
-                    expanded=False,
-                ):
-                    vote_col1, vote_col2 = st.columns(2)
-                    with vote_col1:
-                        if st.button("👍 Useful / emerging", key=widget_key("up", signal_id)):
-                            save_vote(signal_id, "up")
-                            st.success("Vote saved.")
-                            st.rerun()
-                    with vote_col2:
-                        if st.button("👎 Not useful", key=widget_key("down", signal_id)):
-                            save_vote(signal_id, "down")
-                            st.warning("Vote saved.")
-                            st.rerun()
-
-                    comment = st.text_input(
-                        "Optional note",
-                        key=widget_key("comment", signal_id),
-                        placeholder="Why is this useful, emerging, noisy, or irrelevant?",
-                    )
-                    if st.button("Save note", key=widget_key("note", signal_id)):
-                        if comment.strip():
-                            save_vote(signal_id, "note", comment)
-                            st.success("Note saved.")
-                            st.rerun()
-                        else:
-                            st.info("Write a note before saving.")
-
-                if col_discussion_tags:
-                    discussion_tags = extract_hashtags(row.get(col_discussion_tags), lower=False)
-                    if discussion_tags:
-                        st.markdown("**Discussion hashtags:** " + " ".join([f"`{t}`" for t in discussion_tags]))
-
-                if col_tags:
-                    parsed = extract_hashtags(row.get(col_tags), lower=False)
-                    if parsed:
-                        st.markdown("**Signal hashtags:** " + " ".join([f"`{t}`" for t in parsed]))
-                    else:
-                        st.markdown("**Signal hashtags:** NA")
-
-                if col_tag_origin:
-                    st.markdown(f"**Tag origin:** {safe_text(row.get(col_tag_origin))}")
-                if col_tag_review:
-                    st.markdown(f"**Tag review:** {safe_text(row.get(col_tag_review))}")
-
-                if semantic_query.strip() and "semantic_score" in df.columns:
-                    score = df.loc[idx, "semantic_score"]
-                    st.markdown(f"**Semantic similarity:** {score:.3f}")
-
-                if col_link:
-                    link = safe_text(row.get(col_link))
-                    if link != "NA":
-                        st.markdown(f"[Open original]({link})")
-
-            st.divider()
+    if page_df.empty:
+        st.info("No records match the current filters.")
+    else:
+        rows = list(page_df.iterrows())
+        for start in range(0, len(rows), 3):
+            cols = st.columns(3)
+            for offset, (idx, row) in enumerate(rows[start:start + 3]):
+                with cols[offset]:
+                    render_signal_card(row, idx, semantic_query=semantic_query)
 with overview_tab:
     st.markdown("## Overview")
     if col_time and df["message_dt"].notna().any():
