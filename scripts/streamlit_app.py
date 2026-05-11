@@ -1,6 +1,8 @@
+import hashlib
 import os
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -14,8 +16,10 @@ from sklearn.metrics.pairwise import cosine_similarity
 st.set_page_config(page_title="CSF Signals Search", layout="wide")
 
 APP_DIR = Path(__file__).resolve().parent
-REPO_ROOT = APP_DIR.parent
+# Works whether this file sits at the repo root or inside an app/ folder.
+REPO_ROOT = APP_DIR if (APP_DIR / "data").exists() else APP_DIR.parent
 CSV_PATH = REPO_ROOT / "data/processed/processed_signals.csv"
+VOTES_PATH = REPO_ROOT / "data/processed/signal_votes.csv"
 IMAGE_BASE_URL = os.getenv("CSF_IMAGE_BASE_URL", "").rstrip("/")
 
 
@@ -126,6 +130,75 @@ def show_image_from_candidates(candidates):
     return shown
 
 
+# -----------------------------
+# Human review / voting helpers
+# -----------------------------
+VOTE_COLUMNS = ["signal_id", "vote", "comment", "timestamp"]
+
+
+def widget_key(prefix, value):
+    """Make short, stable Streamlit widget keys from long IDs/URLs."""
+    digest = hashlib.sha1(str(value).encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}_{digest}"
+
+
+def load_votes():
+    if not VOTES_PATH.exists():
+        return pd.DataFrame(columns=VOTE_COLUMNS)
+
+    try:
+        votes = pd.read_csv(VOTES_PATH)
+    except Exception:
+        return pd.DataFrame(columns=VOTE_COLUMNS)
+
+    for col in VOTE_COLUMNS:
+        if col not in votes.columns:
+            votes[col] = ""
+    return votes[VOTE_COLUMNS]
+
+
+def save_vote(signal_id, vote, comment=""):
+    VOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    votes = load_votes()
+
+    new_vote = pd.DataFrame([
+        {
+            "signal_id": str(signal_id),
+            "vote": vote,
+            "comment": str(comment or "").strip(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    ])
+
+    votes = pd.concat([votes, new_vote], ignore_index=True)
+    votes.to_csv(VOTES_PATH, index=False)
+
+
+def vote_summary():
+    votes = load_votes()
+    if votes.empty:
+        return pd.DataFrame(columns=["signal_id", "upvotes", "downvotes", "notes", "score"])
+
+    votes["signal_id"] = votes["signal_id"].astype(str)
+    vote_counts = votes.pivot_table(
+        index="signal_id",
+        columns="vote",
+        aggfunc="size",
+        fill_value=0,
+    ).reset_index()
+
+    for col in ["up", "down", "note"]:
+        if col not in vote_counts.columns:
+            vote_counts[col] = 0
+
+    vote_counts["upvotes"] = vote_counts["up"].astype(int)
+    vote_counts["downvotes"] = vote_counts["down"].astype(int)
+    vote_counts["notes"] = vote_counts["note"].astype(int)
+    vote_counts["score"] = vote_counts["upvotes"] - vote_counts["downvotes"]
+
+    return vote_counts[["signal_id", "upvotes", "downvotes", "notes", "score"]]
+
+
 @st.cache_data
 def load_data():
     if not CSV_PATH.exists():
@@ -224,6 +297,22 @@ if col_stage is None:
     df["signal_stage"] = "NA"
     col_stage = "signal_stage"
 
+# Merge human review scores into the main dataset.
+votes_df = vote_summary()
+if col_id:
+    df[col_id] = df[col_id].astype(str)
+    df = df.merge(votes_df, left_on=col_id, right_on="signal_id", how="left", suffixes=("", "_votes"))
+else:
+    df["upvotes"] = 0
+    df["downvotes"] = 0
+    df["notes"] = 0
+    df["score"] = 0
+
+for review_col in ["upvotes", "downvotes", "notes", "score"]:
+    if review_col not in df.columns:
+        df[review_col] = 0
+    df[review_col] = df[review_col].fillna(0).astype(int)
+
 search_cols = [col_header, col_summary, col_tags, col_discussion_tags, col_channel, col_domain]
 df["search_text"] = df.apply(lambda row: build_search_text(row, search_cols), axis=1)
 
@@ -260,6 +349,17 @@ with explore_tab:
         keyword_search = st.text_input("Keyword search", "")
         semantic_query = st.text_input("Semantic search", "")
 
+        sort_by = st.selectbox(
+            "Sort results by",
+            [
+                "Newest first",
+                "Semantic relevance",
+                "Highest human score",
+                "Most upvoted",
+                "Most downvoted",
+            ],
+        )
+
         top_n = 30
 
     filtered = df.copy()
@@ -279,16 +379,30 @@ with explore_tab:
         query_embedding = compute_embeddings([semantic_query])[0]
         sims = cosine_similarity([query_embedding], embeddings)[0]
         df["semantic_score"] = sims
-        filtered = filtered.loc[df.loc[filtered.index, "semantic_score"].sort_values(ascending=False).index]
     else:
         df["semantic_score"] = np.nan
 
+    if sort_by == "Semantic relevance" and semantic_query.strip():
+        filtered = filtered.loc[df.loc[filtered.index, "semantic_score"].sort_values(ascending=False).index]
+    elif sort_by == "Highest human score":
+        sort_cols = ["score"] + (["message_dt"] if "message_dt" in filtered.columns else [])
+        filtered = filtered.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+    elif sort_by == "Most upvoted":
+        sort_cols = ["upvotes"] + (["message_dt"] if "message_dt" in filtered.columns else [])
+        filtered = filtered.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+    elif sort_by == "Most downvoted":
+        sort_cols = ["downvotes"] + (["message_dt"] if "message_dt" in filtered.columns else [])
+        filtered = filtered.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+    elif col_time and "message_dt" in filtered.columns:
+        filtered = filtered.sort_values("message_dt", ascending=False, na_position="last")
+
     filtered = filtered.head(top_n)
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Visible records", len(filtered))
     c2.metric("Total records", len(df))
     c3.metric("Total unique hashtags", len(all_tags))
+    c4.metric("Human votes", int(df["upvotes"].sum() + df["downvotes"].sum()))
 
     st.markdown("### Top hashtags in current view")
     current_tag_counter = Counter(tag for tags in filtered["parsed_hashtags"] for tag in tags)
@@ -347,6 +461,41 @@ with explore_tab:
                 if col_summary:
                     st.markdown(f"**Article summary:** {safe_text(row.get(col_summary))}")
 
+                signal_id = safe_text(row.get(col_id)) if col_id else str(idx)
+                upvotes = int(row.get("upvotes", 0))
+                downvotes = int(row.get("downvotes", 0))
+                notes = int(row.get("notes", 0))
+                human_score = int(row.get("score", 0))
+
+                with st.expander(
+                    f"Human review: 👍 {upvotes} | 👎 {downvotes} | Notes {notes} | Score {human_score}",
+                    expanded=False,
+                ):
+                    vote_col1, vote_col2 = st.columns(2)
+                    with vote_col1:
+                        if st.button("👍 Useful / emerging", key=widget_key("up", signal_id)):
+                            save_vote(signal_id, "up")
+                            st.success("Vote saved.")
+                            st.rerun()
+                    with vote_col2:
+                        if st.button("👎 Not useful", key=widget_key("down", signal_id)):
+                            save_vote(signal_id, "down")
+                            st.warning("Vote saved.")
+                            st.rerun()
+
+                    comment = st.text_input(
+                        "Optional note",
+                        key=widget_key("comment", signal_id),
+                        placeholder="Why is this useful, emerging, noisy, or irrelevant?",
+                    )
+                    if st.button("Save note", key=widget_key("note", signal_id)):
+                        if comment.strip():
+                            save_vote(signal_id, "note", comment)
+                            st.success("Note saved.")
+                            st.rerun()
+                        else:
+                            st.info("Write a note before saving.")
+
                 if col_discussion_tags:
                     discussion_tags = extract_hashtags(row.get(col_discussion_tags), lower=False)
                     if discussion_tags:
@@ -384,13 +533,23 @@ with overview_tab:
         latest_time = None
         recent = df.copy()
 
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("All records", len(df))
     m2.metric("Last 30 days", len(recent))
     m3.metric("Needs tag review", int((df[col_tag_review] == "needs_review").sum()) if col_tag_review else 0)
+    m4.metric("Human votes", int(df["upvotes"].sum() + df["downvotes"].sum()))
 
     if latest_time is not None:
         st.caption(f"Recent window anchored to latest record in dataset: {latest_time}")
+
+    if "score" in df.columns and (df["upvotes"].sum() + df["downvotes"].sum()) > 0:
+        st.markdown("### Highest-rated signals by human review")
+        display_cols = []
+        for candidate in [col_time, col_channel, col_header, col_domain, "upvotes", "downvotes", "score"]:
+            if candidate and candidate in df.columns and candidate not in display_cols:
+                display_cols.append(candidate)
+        top_reviewed = df.sort_values(["score", "upvotes"], ascending=[False, False]).head(10)
+        st.dataframe(top_reviewed[display_cols], use_container_width=True, hide_index=True)
 
     if col_channel and not recent.empty:
         st.markdown("### Signals by sub-channel (last 30 days)")
