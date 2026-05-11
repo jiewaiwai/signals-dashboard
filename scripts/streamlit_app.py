@@ -140,28 +140,60 @@ def short_text(val, max_chars=220):
     return text[:max_chars].rsplit(" ", 1)[0] + "…"
 
 
-def choose_display_tags(row, max_tags=8):
-    """Prefer human WhatsApp hashtags; otherwise show generated/taxonomy tags."""
-    discussion_tags = extract_hashtags(row.get(col_discussion_tags), lower=False) if col_discussion_tags else []
+def unique_tags(tags):
+    out = []
+    seen = set()
+    for tag in tags or []:
+        if not tag:
+            continue
+        key = tag.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(tag)
+    return out
+
+
+def get_tag_groups(row, max_tags=8):
+    """Return all available tag layers instead of hiding AI tags behind human tags."""
+    human_tags = extract_hashtags(row.get(col_discussion_tags), lower=False) if col_discussion_tags else []
+    ai_tags = extract_hashtags(row.get(col_ai_tags), lower=False) if col_ai_tags else []
     signal_tags = extract_hashtags(row.get(col_tags), lower=False) if col_tags else []
     tag_origin = safe_text(row.get(col_tag_origin)) if col_tag_origin else "NA"
 
-    if discussion_tags:
-        return discussion_tags[:max_tags], "human", "Human tag"
-    if signal_tags:
-        if tag_origin.startswith("ai_generated"):
-            return signal_tags[:max_tags], "ai", "AI tag"
-        if tag_origin.startswith("taxonomy_match"):
-            return signal_tags[:max_tags], "taxonomy", "Matched tag"
-        return signal_tags[:max_tags], "other", "Tag"
-    return [], "none", ""
+    # Backward compatibility: older CSVs may not have ai_hashtags, but may have
+    # AI-generated tags stored in signal_hashtags.
+    if not ai_tags and tag_origin.startswith("ai_generated"):
+        ai_tags = signal_tags
+
+    taxonomy_tags = []
+    if tag_origin.startswith("taxonomy_match"):
+        taxonomy_tags = signal_tags
+
+    groups = []
+
+    human_tags = unique_tags(human_tags)[:max_tags]
+    if human_tags:
+        groups.append(("human", "Human tag", human_tags))
+
+    # Show AI tags even when human tags exist, but avoid repeating exact duplicates.
+    human_keys = {t.lower() for t in human_tags}
+    ai_tags = [t for t in unique_tags(ai_tags) if t.lower() not in human_keys][:max_tags]
+    if ai_tags:
+        groups.append(("ai", "Ollama tag", ai_tags))
+
+    used_keys = human_keys | {t.lower() for t in ai_tags}
+    taxonomy_tags = [t for t in unique_tags(taxonomy_tags) if t.lower() not in used_keys][:max_tags]
+    if taxonomy_tags:
+        groups.append(("taxonomy", "Matched tag", taxonomy_tags))
+
+    # Last resort for old / unusual tag origins.
+    if not groups and signal_tags:
+        groups.append(("other", "Tag", unique_tags(signal_tags)[:max_tags]))
+
+    return groups
 
 
-def render_tag_chips(row, max_tags=8):
-    tags, source, label = choose_display_tags(row, max_tags=max_tags)
-    if not tags:
-        return
-
+def render_chip_group(source, label, tags):
     styles = {
         "human": {
             "bg": "#dcfce7", "border": "#86efac", "text": "#166534", "label": "#15803d",
@@ -184,11 +216,17 @@ def render_tag_chips(row, max_tags=8):
         for tag in tags
     )
     st.markdown(
-        f'<div style="margin-top:0.35rem; margin-bottom:0.35rem;">'
+        f'<div style="margin-top:0.25rem; margin-bottom:0.15rem;">'
         f'<span style="font-size:0.72rem; color:{stl["label"]}; font-weight:700; '
         f'margin-right:6px;">{label}</span>{chips}</div>',
         unsafe_allow_html=True,
     )
+
+
+def render_tag_chips(row, max_tags=8):
+    groups = get_tag_groups(row, max_tags=max_tags)
+    for source, label, tags in groups:
+        render_chip_group(source, label, tags)
 
 
 def render_signal_card(row, idx, semantic_query=""):
@@ -423,6 +461,7 @@ col_channel = pick_column(df, ["sub_channel_name", "sub channel name"])
 col_summary = pick_column(df, ["article_summary", "llm_summary", "llm summary of the article"])
 col_tags = pick_column(df, ["signal_hashtags", "article_hashtags", "llm_key_hashtags"])
 col_discussion_tags = pick_column(df, ["discussion_hashtags"])
+col_ai_tags = pick_column(df, ["ai_hashtags", "ollama_hashtags", "generated_hashtags"])
 col_extracted = pick_column(df, ["article_text_extracted", "article_text_extracted?"])
 col_stage = pick_column(df, ["signal_stage", "suggested_stage", "stage"])
 col_domain = pick_column(df, ["source_domain"])
@@ -458,13 +497,17 @@ for review_col in ["upvotes", "downvotes", "notes", "score"]:
 df["vetoed"] = df["downvotes"] > 0
 df["opinion_rank"] = np.where(df["vetoed"], -1_000_000 - df["downvotes"], df["upvotes"])
 
-search_cols = [col_header, col_summary, col_tags, col_discussion_tags, col_channel, col_domain]
+search_cols = [col_header, col_summary, col_tags, col_discussion_tags, col_ai_tags, col_channel, col_domain]
 df["search_text"] = df.apply(lambda row: build_search_text(row, search_cols), axis=1)
 
-if col_tags:
-    df["parsed_hashtags"] = df[col_tags].fillna("").apply(extract_hashtags)
-else:
-    df["parsed_hashtags"] = [[] for _ in range(len(df))]
+def combined_row_hashtags(row):
+    tags = []
+    for c in [col_discussion_tags, col_ai_tags, col_tags]:
+        if c and c in row.index:
+            tags.extend(extract_hashtags(row.get(c)))
+    return unique_tags(tags)
+
+df["parsed_hashtags"] = df.apply(combined_row_hashtags, axis=1)
 
 all_tags = sorted(set(tag for tags in df["parsed_hashtags"] for tag in tags))
 
@@ -547,7 +590,7 @@ with explore_tab:
     c3.metric("Total unique hashtags", len(all_tags))
     c4.metric("Positive votes", int(df["upvotes"].sum()))
 
-    st.caption("Hashtags: green = original WhatsApp human tag; blue = AI-generated fallback; grey = taxonomy match.")
+    st.caption("Hashtags: green = original WhatsApp human tag; blue = Ollama/AI-generated tag; grey = taxonomy match.")
 
     # Pagination: the result set is no longer capped with .head().
     # Instead, all matching records are split into pages.
