@@ -181,19 +181,6 @@ def label_clusters(df, col_tags, col_header):
 
 
 
-def find_top_cooccurring_tags(df, selected_tag, col_tags, top_n=10):
-    counter = Counter()
-    if not col_tags or not selected_tag:
-        return []
-
-    for val in df[col_tags].fillna(""):
-        tags = set(extract_hashtags(val))
-        if selected_tag in tags:
-            tags.discard(selected_tag)
-            counter.update(tags)
-
-    return counter.most_common(top_n)
-
 
 
 def flatten_tags(series):
@@ -270,47 +257,10 @@ with explore_tab:
         else:
             selected_channels = None
 
-        if col_domain:
-            domains = sorted([d for d in df[col_domain].dropna().astype(str).unique().tolist() if d])
-            selected_domains = st.multiselect("Source domain", domains, default=domains)
-        else:
-            selected_domains = None
-
-        if col_fetch_status:
-            statuses = sorted(df[col_fetch_status].dropna().astype(str).unique().tolist())
-            selected_statuses = st.multiselect("Fetch status", statuses, default=statuses)
-        else:
-            selected_statuses = None
-
-        if col_tag_review:
-            review_states = sorted(df[col_tag_review].dropna().astype(str).unique().tolist())
-            selected_review_states = st.multiselect("Tag review status", review_states, default=review_states)
-        else:
-            selected_review_states = None
-
-        if col_stage:
-            stages = sorted(df[col_stage].dropna().astype(str).unique().tolist())
-            selected_stages = st.multiselect("Signal stage", stages, default=stages)
-        else:
-            selected_stages = None
-
-        only_signals = st.checkbox("Only weak signals / emerging patterns")
-
         keyword_search = st.text_input("Keyword search", "")
         semantic_query = st.text_input("Semantic search", "")
 
-        selected_tag = st.selectbox("Hashtag focus", ["(none)"] + all_tags)
-
-        cluster_options = ["(all)"] + sorted(df["cluster_label"].dropna().unique().tolist())
-        selected_cluster = st.selectbox("Cluster", cluster_options)
-
-        if col_extracted:
-            extracted_vals = sorted(df[col_extracted].dropna().astype(str).unique().tolist())
-            selected_extracted = st.multiselect("Article text extracted?", extracted_vals, default=extracted_vals)
-        else:
-            selected_extracted = None
-
-        top_n = st.slider("Max results", 5, 100, 30)
+        top_n = 30
 
     filtered = df.copy()
     filtered = filtered[filtered[col_type].astype(str).isin(selected_types)]
@@ -318,36 +268,12 @@ with explore_tab:
     if col_channel and selected_channels is not None:
         filtered = filtered[filtered[col_channel].astype(str).isin(selected_channels)]
 
-    if col_domain and selected_domains is not None and len(selected_domains) > 0:
-        filtered = filtered[filtered[col_domain].astype(str).isin(selected_domains)]
-
-    if col_fetch_status and selected_statuses is not None:
-        filtered = filtered[filtered[col_fetch_status].astype(str).isin(selected_statuses)]
-
-    if col_tag_review and selected_review_states is not None:
-        filtered = filtered[filtered[col_tag_review].astype(str).isin(selected_review_states)]
-
-    if col_stage and selected_stages is not None:
-        filtered = filtered[filtered[col_stage].astype(str).isin(selected_stages)]
-
-    if only_signals and col_stage:
-        filtered = filtered[
-            filtered[col_stage].astype(str).str.lower().isin(["weak signal", "emerging pattern"])
-        ]
-
-    if col_extracted and selected_extracted is not None:
-        filtered = filtered[filtered[col_extracted].astype(str).isin(selected_extracted)]
 
     if keyword_search:
         filtered = filtered[
             filtered["search_text"].astype(str).str.contains(keyword_search, case=False, na=False)
         ]
 
-    if selected_tag != "(none)":
-        filtered = filtered[filtered["parsed_hashtags"].apply(lambda tags: selected_tag in tags)]
-
-    if selected_cluster != "(all)":
-        filtered = filtered[filtered["cluster_label"] == selected_cluster]
 
     if semantic_query.strip():
         query_embedding = compute_embeddings([semantic_query])[0]
@@ -372,13 +298,6 @@ with explore_tab:
     else:
         st.write("No hashtags in current view.")
 
-    if selected_tag != "(none)":
-        st.markdown(f"### Co-occurring hashtags with `{selected_tag}`")
-        co_tags = find_top_cooccurring_tags(filtered, selected_tag, col_tags)
-        if co_tags:
-            st.markdown("  ".join([f"`{tag}` ({count})" for tag, count in co_tags]))
-        else:
-            st.write("No co-occurring hashtags found.")
 
     st.markdown("### Clusters in current view")
     cluster_counts = (
