@@ -140,6 +140,57 @@ def short_text(val, max_chars=220):
     return text[:max_chars].rsplit(" ", 1)[0] + "…"
 
 
+def choose_display_tags(row, max_tags=8):
+    """Prefer human WhatsApp hashtags; otherwise show generated/taxonomy tags."""
+    discussion_tags = extract_hashtags(row.get(col_discussion_tags), lower=False) if col_discussion_tags else []
+    signal_tags = extract_hashtags(row.get(col_tags), lower=False) if col_tags else []
+    tag_origin = safe_text(row.get(col_tag_origin)) if col_tag_origin else "NA"
+
+    if discussion_tags:
+        return discussion_tags[:max_tags], "human", "Human tag"
+    if signal_tags:
+        if tag_origin.startswith("ai_generated"):
+            return signal_tags[:max_tags], "ai", "AI tag"
+        if tag_origin.startswith("taxonomy_match"):
+            return signal_tags[:max_tags], "taxonomy", "Matched tag"
+        return signal_tags[:max_tags], "other", "Tag"
+    return [], "none", ""
+
+
+def render_tag_chips(row, max_tags=8):
+    tags, source, label = choose_display_tags(row, max_tags=max_tags)
+    if not tags:
+        return
+
+    styles = {
+        "human": {
+            "bg": "#dcfce7", "border": "#86efac", "text": "#166534", "label": "#15803d",
+        },
+        "ai": {
+            "bg": "#e0f2fe", "border": "#7dd3fc", "text": "#075985", "label": "#0369a1",
+        },
+        "taxonomy": {
+            "bg": "#f3f4f6", "border": "#d1d5db", "text": "#374151", "label": "#6b7280",
+        },
+        "other": {
+            "bg": "#f5f3ff", "border": "#c4b5fd", "text": "#5b21b6", "label": "#6d28d9",
+        },
+    }
+    stl = styles.get(source, styles["other"])
+    chips = "".join(
+        f'<span style="display:inline-block; margin:0 6px 6px 0; padding:4px 8px; '
+        f'border-radius:999px; border:1px solid {stl["border"]}; background:{stl["bg"]}; '
+        f'color:{stl["text"]}; font-size:0.78rem; font-weight:600;">{tag}</span>'
+        for tag in tags
+    )
+    st.markdown(
+        f'<div style="margin-top:0.35rem; margin-bottom:0.35rem;">'
+        f'<span style="font-size:0.72rem; color:{stl["label"]}; font-weight:700; '
+        f'margin-right:6px;">{label}</span>{chips}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_signal_card(row, idx, semantic_query=""):
     """Render one signal as a compact card for the grid layout."""
     with st.container(border=True):
@@ -177,10 +228,7 @@ def render_signal_card(row, idx, semantic_query=""):
             if summary != "NA":
                 st.markdown(summary)
 
-        if col_tags:
-            parsed = extract_hashtags(row.get(col_tags), lower=False)
-            if parsed:
-                st.markdown(" ".join([f"`{t}`" for t in parsed[:6]]))
+        render_tag_chips(row, max_tags=6)
 
         signal_id = safe_text(row.get(col_id)) if col_id else str(idx)
         upvotes = int(row.get("upvotes", 0))
@@ -498,6 +546,8 @@ with explore_tab:
     c2.metric("Total records", len(df))
     c3.metric("Total unique hashtags", len(all_tags))
     c4.metric("Positive votes", int(df["upvotes"].sum()))
+
+    st.caption("Hashtags: green = original WhatsApp human tag; blue = AI-generated fallback; grey = taxonomy match.")
 
     # Pagination: the result set is no longer capped with .head().
     # Instead, all matching records are split into pages.
