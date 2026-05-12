@@ -52,10 +52,51 @@ def normalize_text(val):
 
 
 def extract_hashtags(text, lower=True):
-    if not text or pd.isna(text):
+    """Extract tags from both hashtag strings and plain comma/semicolon tag lists.
+
+    Older datasets may store AI/Ollama tags as "#AI #jobs" while newer or
+    intermediate outputs may store them as "AI, jobs" or "AI | jobs". This
+    parser normalises both forms so the UI can show Ollama tags reliably.
+    """
+    if text is None or pd.isna(text):
         return []
-    tags = re.findall(r"#[A-Za-z0-9_\-/]+", str(text))
+
+    raw = str(text).strip()
+    if not raw or raw == "NA":
+        return []
+
+    hashtag_matches = re.findall(r"#[A-Za-z0-9_\-/]+", raw)
+    if hashtag_matches:
+        tags = hashtag_matches
+    else:
+        # Split plain tag lists while avoiding accidental extraction from prose.
+        pieces = re.split(r"[,;|\n]+", raw)
+        tags = []
+        for piece in pieces:
+            piece = piece.strip().strip("[](){}'\"")
+            if not piece or piece.upper() == "NA":
+                continue
+            # Keep short tag-like phrases; drop long sentences.
+            if len(piece.split()) > 4 or len(piece) > 40:
+                continue
+            piece = re.sub(r"\s+", "_", piece)
+            piece = re.sub(r"[^A-Za-z0-9_\-/]", "", piece)
+            if piece:
+                tags.append("#" + piece.lstrip("#"))
+
     return [t.lower() if lower else t for t in tags]
+
+
+def clean_summary_text(val, max_chars=260):
+    """Trim display summary and suppress WhatsApp discussion-context boilerplate."""
+    text = short_text(val, max_chars=max_chars)
+    if text == "NA":
+        return "NA"
+
+    # Remove snippets such as "Discussion context: #AI." from card bodies.
+    text = re.sub(r"\s*Discussion context:\s*[^.。!?]*(?:[.。!?]|$)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or "NA"
 
 
 
@@ -161,8 +202,13 @@ def get_tag_groups(row, max_tags=8):
     tag_origin = safe_text(row.get(col_tag_origin)) if col_tag_origin else "NA"
 
     # Backward compatibility: older CSVs may not have ai_hashtags, but may have
-    # AI-generated tags stored in signal_hashtags.
-    if not ai_tags and tag_origin.startswith("ai_generated"):
+    # AI/Ollama-generated tags stored in signal_hashtags or article_hashtags.
+    if not ai_tags and (
+        tag_origin.startswith("ai_generated")
+        or tag_origin.startswith("ollama")
+        or "ai" in tag_origin.lower()
+        or "ollama" in tag_origin.lower()
+    ):
         ai_tags = signal_tags
 
     taxonomy_tags = []
@@ -262,7 +308,7 @@ def render_signal_card(row, idx, semantic_query=""):
             st.caption(" · ".join(meta))
 
         if col_summary:
-            summary = short_text(row.get(col_summary), 260)
+            summary = clean_summary_text(row.get(col_summary), 260)
             if summary != "NA":
                 st.markdown(summary)
 
@@ -461,7 +507,16 @@ col_channel = pick_column(df, ["sub_channel_name", "sub channel name"])
 col_summary = pick_column(df, ["article_summary", "llm_summary", "llm summary of the article"])
 col_tags = pick_column(df, ["signal_hashtags", "article_hashtags", "llm_key_hashtags"])
 col_discussion_tags = pick_column(df, ["discussion_hashtags"])
-col_ai_tags = pick_column(df, ["ai_hashtags", "ollama_hashtags", "generated_hashtags"])
+col_ai_tags = pick_column(df, [
+    "ai_hashtags",
+    "ollama_hashtags",
+    "ollama_tags",
+    "generated_hashtags",
+    "generated_tags",
+    "ai_tags",
+    "llm_key_hashtags",
+    "llm_hashtags",
+])
 col_extracted = pick_column(df, ["article_text_extracted", "article_text_extracted?"])
 col_stage = pick_column(df, ["signal_stage", "suggested_stage", "stage"])
 col_domain = pick_column(df, ["source_domain"])
@@ -594,7 +649,7 @@ with explore_tab:
 
     # Pagination: the result set is no longer capped with .head().
     # Instead, all matching records are split into pages.
-    page_size = st.selectbox("Records per page", [9, 18, 27, 36, 54], index=1)
+    page_size = st.selectbox("Records per page", [8, 16, 24, 32, 48], index=1)
     total_pages = max(1, int(np.ceil(total_matching / page_size)))
 
     if "results_page" not in st.session_state:
@@ -643,9 +698,9 @@ with explore_tab:
         st.info("No records match the current filters.")
     else:
         rows = list(page_df.iterrows())
-        for start in range(0, len(rows), 3):
-            cols = st.columns(3)
-            for offset, (idx, row) in enumerate(rows[start:start + 3]):
+        for start in range(0, len(rows), 2):
+            cols = st.columns(2)
+            for offset, (idx, row) in enumerate(rows[start:start + 2]):
                 with cols[offset]:
                     render_signal_card(row, idx, semantic_query=semantic_query)
 with overview_tab:
