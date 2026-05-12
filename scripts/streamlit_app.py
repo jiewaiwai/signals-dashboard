@@ -87,18 +87,57 @@ def extract_hashtags(text, lower=True):
     return [t.lower() if lower else t for t in tags]
 
 
+def looks_like_metadata_fallback(text):
+    """Detect fallback text that is metadata, not an article summary."""
+    if not text or text == "NA":
+        return True
+    t = str(text).strip().lower()
+    metadata_markers = [
+        "available metadata:",
+        "shared from ",
+        "discussion context:",
+    ]
+    if any(marker in t for marker in metadata_markers):
+        return True
+    if t.startswith("http://") or t.startswith("https://"):
+        return True
+    return False
+
+
 def clean_summary_text(val, max_chars=260):
-    """Trim display summary and suppress WhatsApp discussion-context boilerplate."""
+    """Trim display summary and suppress WhatsApp / metadata boilerplate."""
     text = short_text(val, max_chars=max_chars)
     if text == "NA":
         return "NA"
 
-    # Remove snippets such as "Discussion context: #AI." from card bodies.
     text = re.sub(r"\s*Discussion context:\s*[^.。!?]*(?:[.。!?]|$)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*Available metadata:\s*.*$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^Shared from [^.]+\.\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip()
+
+    if looks_like_metadata_fallback(text):
+        return "NA"
     return text or "NA"
 
 
+def get_display_summary(row, max_chars=260):
+    """Return only a real article summary for the card body.
+
+    Rows with summary_source such as metadata_fallback, discussion_fallback, or
+    none should not show the 'Shared from... Available metadata...' placeholder.
+    This keeps the card body reserved for article summaries.
+    """
+    if not col_summary:
+        return "NA"
+
+    source = safe_text(row.get(col_summary_source)).lower() if col_summary_source else "unknown"
+    if source and source not in ["article_text", "llm_summary", "ai_summary", "unknown", "na"]:
+        return "NA"
+
+    summary = clean_summary_text(row.get(col_summary), max_chars=max_chars)
+    if summary == "NA" or looks_like_metadata_fallback(summary):
+        return "NA"
+    return summary
 
 def build_search_text(row, cols):
     parts = []
@@ -195,49 +234,63 @@ def unique_tags(tags):
 
 
 def get_tag_groups(row, max_tags=8):
-    """Return all available tag layers instead of hiding AI tags behind human tags."""
-    human_tags = extract_hashtags(row.get(col_discussion_tags), lower=False) if col_discussion_tags else []
-    ai_tags = extract_hashtags(row.get(col_ai_tags), lower=False) if col_ai_tags else []
-    signal_tags = extract_hashtags(row.get(col_tags), lower=False) if col_tags else []
-    tag_origin = safe_text(row.get(col_tag_origin)) if col_tag_origin else "NA"
+    """Classify tags by tag_origin first, then read signal_hashtags.
 
-    # Backward compatibility: older CSVs may not have ai_hashtags, but may have
-    # AI/Ollama-generated tags stored in signal_hashtags or article_hashtags.
-    if not ai_tags and (
-        tag_origin.startswith("ai_generated")
-        or tag_origin.startswith("ollama")
-        or "ai" in tag_origin.lower()
-        or "ollama" in tag_origin.lower()
-    ):
-        ai_tags = signal_tags
+    In this CSV, Ollama tags are stored in signal_hashtags. The source of those
+    tags is not the column name, but tag_origin. So the order must be:
 
-    taxonomy_tags = []
-    if tag_origin.startswith("taxonomy_match"):
-        taxonomy_tags = signal_tags
+    1. read tag_origin
+    2. read signal_hashtags
+    3. colour/label the chips according to tag_origin
+    """
+    tag_origin = safe_text(row.get(col_tag_origin)).strip().lower() if col_tag_origin else "na"
+
+    discussion_tags = extract_tag_tokens(row.get(col_discussion_tags), lower=False) if col_discussion_tags else []
+    signal_tags = extract_tag_tokens(row.get(col_tags), lower=False) if col_tags else []
+    explicit_ai_tags = extract_tag_tokens(row.get(col_ai_tags), lower=False) if col_ai_tags else []
 
     groups = []
 
-    human_tags = unique_tags(human_tags)[:max_tags]
-    if human_tags:
-        groups.append(("human", "Human tag", human_tags))
+    if tag_origin == "discussion_explicit" or tag_origin.startswith("discussion_explicit"):
+        tags = discussion_tags or signal_tags
+        tags = unique_tags(tags)[:max_tags]
+        if tags:
+            groups.append(("human", "Human tag", tags))
 
-    # Show AI tags even when human tags exist, but avoid repeating exact duplicates.
-    human_keys = {t.lower() for t in human_tags}
-    ai_tags = [t for t in unique_tags(ai_tags) if t.lower() not in human_keys][:max_tags]
-    if ai_tags:
-        groups.append(("ai", "Ollama tag", ai_tags))
+    elif tag_origin == "ai_generated_ollama" or "ollama" in tag_origin or tag_origin.startswith("ai_generated"):
+        # This is the important branch: signal_hashtags becomes the blue Ollama layer.
+        ai_tags = unique_tags(explicit_ai_tags or signal_tags)[:max_tags]
+        if ai_tags:
+            groups.append(("ai", "Ollama tag", ai_tags))
 
-    used_keys = human_keys | {t.lower() for t in ai_tags}
-    taxonomy_tags = [t for t in unique_tags(taxonomy_tags) if t.lower() not in used_keys][:max_tags]
-    if taxonomy_tags:
-        groups.append(("taxonomy", "Matched tag", taxonomy_tags))
+        # If the row also carries explicit discussion tags, show them separately.
+        human_tags = [t for t in unique_tags(discussion_tags) if t.lower() not in {a.lower() for a in ai_tags}][:max_tags]
+        if human_tags:
+            groups.insert(0, ("human", "Human tag", human_tags))
 
-    # Last resort for old / unusual tag origins.
-    if not groups and signal_tags:
-        groups.append(("other", "Tag", unique_tags(signal_tags)[:max_tags]))
+    elif tag_origin.startswith("taxonomy_match"):
+        tags = unique_tags(signal_tags)[:max_tags]
+        if tags:
+            groups.append(("taxonomy", "Matched tag", tags))
+
+        human_tags = [t for t in unique_tags(discussion_tags) if t.lower() not in {a.lower() for a in tags}][:max_tags]
+        if human_tags:
+            groups.insert(0, ("human", "Human tag", human_tags))
+
+    else:
+        # Fallback for rows without a reliable tag_origin.
+        human_tags = unique_tags(discussion_tags)[:max_tags]
+        ai_tags = [t for t in unique_tags(explicit_ai_tags) if t.lower() not in {h.lower() for h in human_tags}][:max_tags]
+        other_tags = [t for t in unique_tags(signal_tags) if t.lower() not in {h.lower() for h in human_tags} | {a.lower() for a in ai_tags}][:max_tags]
+
+        if human_tags:
+            groups.append(("human", "Human tag", human_tags))
+        if ai_tags:
+            groups.append(("ai", "Ollama tag", ai_tags))
+        if other_tags:
+            groups.append(("other", "Tag", other_tags))
 
     return groups
-
 
 def render_chip_group(source, label, tags):
     styles = {
@@ -307,10 +360,11 @@ def render_signal_card(row, idx, semantic_query=""):
         if meta:
             st.caption(" · ".join(meta))
 
-        if col_summary:
-            summary = clean_summary_text(row.get(col_summary), 260)
-            if summary != "NA":
-                st.markdown(summary)
+        summary = get_display_summary(row, 260)
+        if summary != "NA":
+            st.markdown(summary)
+        # Deliberately do not show metadata/discussion fallback text here.
+        # The card body is reserved for article summaries.
 
         render_tag_chips(row, max_tags=6)
 
@@ -505,6 +559,7 @@ col_image = pick_column(df, ["image_path", "image file", "local_image_path"])
 col_header = pick_column(df, ["scraped_header", "scraped header of the link"])
 col_channel = pick_column(df, ["sub_channel_name", "sub channel name"])
 col_summary = pick_column(df, ["article_summary", "llm_summary", "llm summary of the article"])
+col_summary_source = pick_column(df, ["summary_source"])
 col_tags = pick_column(df, ["signal_hashtags", "article_hashtags", "llm_key_hashtags"])
 col_discussion_tags = pick_column(df, ["discussion_hashtags"])
 col_ai_tags = pick_column(df, [
@@ -514,14 +569,13 @@ col_ai_tags = pick_column(df, [
     "generated_hashtags",
     "generated_tags",
     "ai_tags",
-    "llm_key_hashtags",
     "llm_hashtags",
 ])
 col_extracted = pick_column(df, ["article_text_extracted", "article_text_extracted?"])
 col_stage = pick_column(df, ["signal_stage", "suggested_stage", "stage"])
 col_domain = pick_column(df, ["source_domain"])
 col_fetch_status = pick_column(df, ["fetch_status"])
-col_tag_origin = pick_column(df, ["tag_origin"])
+col_tag_origin = pick_column(df, ["tag_origin", "tag-origin", "tag origin"])
 col_tag_review = pick_column(df, ["tag_review_status"])
 
 if col_type is None:
