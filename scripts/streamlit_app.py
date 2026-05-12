@@ -87,6 +87,11 @@ def extract_hashtags(text, lower=True):
     return [t.lower() if lower else t for t in tags]
 
 
+def extract_tag_tokens(text, lower=True):
+    """Backward-compatible alias used by the tag rendering logic."""
+    return extract_hashtags(text, lower=lower)
+
+
 def looks_like_metadata_fallback(text):
     """Detect fallback text that is metadata, not an article summary."""
     if not text or text == "NA":
